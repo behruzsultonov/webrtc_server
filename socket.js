@@ -47,6 +47,17 @@ module.exports.initIO = (httpServer) => {
         rtcMessage: rtcMessage,
       });
     });
+
+    // Handle leave call event
+    socket.on("leaveCall", (data) => {
+      console.log("User left call", data);
+      let userId = data.userId;
+      
+      // Notify the other user that this user has left
+      socket.to(userId).emit("userLeft", {
+        userId: socket.user,
+      });
+    });
   });
 };
 

@@ -58,6 +58,17 @@ module.exports.initIO = (httpServer) => {
         userId: socket.user,
       });
     });
+    
+    // Handle reject call event
+    socket.on("rejectCall", (data) => {
+      console.log("User rejected call", data);
+      let userId = data.userId;
+      
+      // Notify the caller that the call was rejected
+      socket.to(userId).emit("callRejected", {
+        userId: socket.user,
+      });
+    });
   });
 };
 

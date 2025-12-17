@@ -59,7 +59,7 @@ app.post('/stop-recording', async (req, res) => {
 });
 
 // Serve recording files for download
-app.use('/download-recording', express.static(path.join(__dirname, 'temp_recordings')));
+app.use('/recordings', express.static(path.join(__dirname, 'recordings')));
 
 // Recording finished webhook
 app.post('/recording-finished', async (req, res) => {

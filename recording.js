@@ -174,6 +174,8 @@ async function createRecordingConsumer(room, producerId) {
       port: consumer.rtpParameters.encodings[0].ssrc || 5000,
     });
 
+    console.log(`Created recording consumer for producer ${producerId}`);
+
     return {
       consumer,
       transport: plainTransport,
@@ -202,19 +204,9 @@ async function startRecording(callId) {
     
     // Check if there are any producers to record
     if (room.producers.size === 0) {
-      console.warn(`No producers found in room ${callId} for recording`);
-      // Create an empty recording entry for now
-      const emptyRecording = {
-        callId,
-        startTime: Date.now(),
-        participants: [],
-        tempFiles: [],
-        mixedFile: null,
-      };
-      
-      activeRecordings.set(callId, emptyRecording);
-      console.log(`Started empty recording for call ${callId}`);
-      return emptyRecording;
+      console.warn(`No producers found in room ${callId} for recording - this indicates recording was started before audio was established`);
+      // Don't create an empty recording - this is a logical error
+      throw new Error('Cannot start recording - no audio producers available. This typically happens when recording is started before the call is fully established. Please ensure the call is connected before starting recording.');
     }
 
     // Create temporary directory for recordings
@@ -366,21 +358,8 @@ async function convertRtpToOpus(rtpFile, producerId) {
  */
 async function mixAudioFiles(inputFiles, callId) {
   if (inputFiles.length === 0) {
-    console.log('No input files to mix, creating silent recording');
-    // Create a silent audio file
-    const outputFile = path.join(__dirname, 'temp_recordings', `${callId}_final.ogg`);
-    try {
-      // Create a 1-second silent Opus file using ffmpeg
-      // This creates a minimal valid OGG/Opus file
-      const command = `ffmpeg -f lavfi -i anullsrc=channel_layout=mono:sample_rate=48000 -t 0.1 -c:a libopus -b:a 96k "${outputFile}"`;
-      await execAsync(command);
-      return outputFile;
-    } catch (error) {
-      console.error('Error creating silent recording file:', error);
-      // Fallback: create empty file
-      await fs.writeFile(outputFile, '');
-      return outputFile;
-    }
+    console.log('No input files to mix - this indicates a logical error in the recording flow');
+    throw new Error('No input files to mix - recording was started before audio producers were available');
   }
 
   const outputFile = path.join(__dirname, 'temp_recordings', `${callId}_final.ogg`);

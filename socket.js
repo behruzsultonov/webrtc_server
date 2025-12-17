@@ -99,24 +99,26 @@ module.exports.initIO = (httpServer) => {
     socket.on("start-recording", async (data) => {
       try {
         const { callId } = data;
+        console.log(`Received start-recording request for call: ${callId}`);
         const recording = await require('./recording').startRecording(callId);
         
         socket.emit("recording-started", { callId, recording });
       } catch (error) {
         console.error("Error starting recording:", error);
-        socket.emit("error", { message: "Failed to start recording" });
+        socket.emit("error", { message: `Failed to start recording: ${error.message}` });
       }
     });
 
     socket.on("stop-recording", async (data) => {
       try {
         const { callId } = data;
+        console.log(`Received stop-recording request for call: ${callId}`);
         const result = await require('./recording').stopRecording(callId);
         
         socket.emit("recording-stopped", result);
       } catch (error) {
         console.error("Error stopping recording:", error);
-        socket.emit("error", { message: "Failed to stop recording" });
+        socket.emit("error", { message: `Failed to stop recording: ${error.message}` });
       }
     });
 

@@ -189,10 +189,32 @@ async function createRecordingConsumer(room, producerId) {
  */
 async function startRecording(callId) {
   try {
+    console.log(`Starting recording for call: ${callId}`);
+    
     // Get or create room
     let room = rooms.get(callId);
     if (!room) {
+      console.log(`Room ${callId} not found, creating new room`);
       room = createRoom(callId);
+    }
+    
+    console.log(`Room ${callId} has ${room.producers.size} producers`);
+    
+    // Check if there are any producers to record
+    if (room.producers.size === 0) {
+      console.warn(`No producers found in room ${callId} for recording`);
+      // Create an empty recording entry for now
+      const emptyRecording = {
+        callId,
+        startTime: Date.now(),
+        participants: [],
+        tempFiles: [],
+        mixedFile: null,
+      };
+      
+      activeRecordings.set(callId, emptyRecording);
+      console.log(`Started empty recording for call ${callId}`);
+      return emptyRecording;
     }
 
     // Create temporary directory for recordings
@@ -250,9 +272,18 @@ async function startRecording(callId) {
  */
 async function stopRecording(callId) {
   try {
+    console.log(`Stopping recording for call: ${callId}`);
+    
     const recording = activeRecordings.get(callId);
     if (!recording) {
-      throw new Error('Recording not found');
+      console.warn(`Recording not found for call ${callId}`);
+      // Return a default response instead of throwing an error
+      return {
+        callId,
+        duration: 0,
+        downloadUrl: null,
+        message: 'No recording was found for this call'
+      };
     }
 
     // Stop all consumers and transports

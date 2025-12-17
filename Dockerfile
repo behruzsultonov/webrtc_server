@@ -1,41 +1,61 @@
-# syntax = docker/dockerfile:1
+# Use Ubuntu as base image (recommended for mediasoup)
+FROM ubuntu:20.04
 
-# Adjust NODE_VERSION as desired
-ARG NODE_VERSION=24.7.0
-FROM node:${NODE_VERSION}-slim AS base
+# Avoid prompts from apt
+ENV DEBIAN_FRONTEND=noninteractive
 
-LABEL fly_launch_runtime="Node.js"
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+  curl \
+  git \
+  python3 \
+  python3-pip \
+  build-essential \
+  libtool \
+  automake \
+  autoconf \
+  pkg-config \
+  libclang-dev \
+  libglib2.0-dev \
+  libffi-dev \
+  libpixman-1-dev \
+  libcairo2-dev \
+  libfreetype6-dev \
+  libharfbuzz-dev \
+  libjpeg-dev \
+  libpng-dev \
+  libgif-dev \
+  libwebp-dev \
+  libsqlite3-dev \
+  libavcodec-dev \
+  libavformat-dev \
+  libavutil-dev \
+  libswscale-dev \
+  ffmpeg \
+  && rm -rf /var/lib/apt/lists/*
 
-# Node.js app lives here
+# Install Node.js
+RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
+  && apt-get install -y nodejs
+
+# Create app directory
 WORKDIR /app
 
-# Set production environment
-ENV NODE_ENV="production"
-ARG YARN_VERSION=1.22.22
-RUN npm install -g yarn@$YARN_VERSION --force
+# Copy package files
+COPY package*.json ./
 
+# Install dependencies
+RUN npm ci
 
-# Throw-away build stage to reduce size of final image
-FROM base AS build
-
-# Install packages needed to build node modules
-RUN apt-get update -qq && \
-    apt-get install --no-install-recommends -y build-essential node-gyp pkg-config python-is-python3
-
-# Install node modules
-COPY package-lock.json package.json yarn.lock ./
-RUN yarn install --frozen-lockfile
-
-# Copy application code
+# Copy app source
 COPY . .
 
+# Expose ports
+EXPOSE 3500 40000-49999/udp
 
-# Final stage for app image
-FROM base
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:3500/ || exit 1
 
-# Copy built application
-COPY --from=build /app /app
-
-# Start the server by default, this can be overwritten at runtime
-EXPOSE 3000
-CMD [ "yarn", "run", "start" ]
+# Start the application
+CMD ["npm", "start"]

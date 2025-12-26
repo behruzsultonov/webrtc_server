@@ -14,14 +14,23 @@ const httpServer = createServer(app);
 
 let port = process.env.PORT || 3500;
 
-// Initialize mediasoup worker
-initializeWorker().then(() => {
-  console.log('Mediasoup worker initialized');
-}).catch(err => {
-  console.error('Failed to initialize mediasoup worker:', err);
-});
+// Start server only after mediasoup worker is initialized
+(async () => {
+  try {
+    await initializeWorker();
+    console.log('Mediasoup worker initialized');
 
-initIO(httpServer);
+    // Safe to start Socket.IO now
+    initIO(httpServer);
+
+    // Start HTTP server
+    httpServer.listen(port);
+    console.log('Server started on', port);
+  } catch (err) {
+    console.error('Failed to initialize mediasoup worker or start server:', err);
+    process.exit(1);
+  }
+})();
 
 // Recording API endpoints
 const recording = require('./recording');
@@ -34,10 +43,11 @@ app.post('/start-recording', async (req, res) => {
       return res.status(400).json({ error: 'callId is required' });
     }
     
+    console.log(`[debug] /start-recording called for ${callId}`);
     const recordingResult = await recording.startRecording(callId);
     res.json({ success: true, recording: recordingResult });
   } catch (error) {
-    console.error('Error starting recording:', error);
+    console.error('[debug] Error starting recording:', error && error.message ? error.message : error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -50,11 +60,58 @@ app.post('/stop-recording', async (req, res) => {
       return res.status(400).json({ error: 'callId is required' });
     }
     
+    console.log(`[debug] /stop-recording called for ${callId}`);
     const result = await recording.stopRecording(callId);
     res.json({ success: true, result });
   } catch (error) {
-    console.error('Error stopping recording:', error);
+    console.error('[debug] Error stopping recording:', error && error.message ? error.message : error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+// Debug endpoints
+app.get('/debug/recordings/status', (req, res) => {
+  try {
+    const status = recording.getStatus();
+    res.json({ success: true, status });
+  } catch (err) {
+    console.error('[debug] failed to get recordings status', err && err.message ? err.message : err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Expose router RTP capabilities for quick debugging
+app.get('/debug/router-rtp-capabilities', (req, res) => {
+  try {
+    const resObj = recording.getRouterRtpCapabilities();
+    res.json(Object.assign({ success: true }, resObj));
+  } catch (err) {
+    console.error('[debug] failed to get router rtp capabilities', err && err.message ? err.message : err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/debug/recordings/start', async (req, res) => {
+  try {
+    const { callId } = req.body;
+    if (!callId) return res.status(400).json({ error: 'callId required' });
+    const result = await recording.startRecording(callId);
+    res.json({ success: true, result });
+  } catch (err) {
+    console.error('[debug] start recording failed', err && err.message ? err.message : err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/debug/recordings/stop', async (req, res) => {
+  try {
+    const { callId } = req.body;
+    if (!callId) return res.status(400).json({ error: 'callId required' });
+    const result = await recording.stopRecording(callId);
+    res.json({ success: true, result });
+  } catch (err) {
+    console.error('[debug] stop recording failed', err && err.message ? err.message : err);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -80,7 +137,3 @@ app.post('/recording-finished', async (req, res) => {
   }
 });
 
-httpServer.listen(port)
-console.log("Server started on ", port);
-
-getIO();

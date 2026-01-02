@@ -2,6 +2,7 @@
 const mediasoup = require('mediasoup');
 const fs = require('fs').promises;
 const path = require('path');
+const crypto = require('crypto');
 // Import get-port for dynamic port allocation
 let getPort = null;
 try {
@@ -48,13 +49,14 @@ async function initDirectories() {
   }
 }
 
-initDirectories();
-
 /**
  * Initialize mediasoup worker
  */
 async function initializeWorker() {
   try {
+    // Ensure directories exist before starting worker
+    await initDirectories();
+    
     worker = await mediasoup.createWorker({
       logLevel: 'warn',
       logTags: [
@@ -252,6 +254,13 @@ async function waitForProducers(room, timeoutMs = 10000, intervalMs = 250) {
 async function startRecording(callId) {
   try {
     console.log(`Starting recording for call: ${callId}`);
+    
+    // Check if recording already exists for this callId
+    if (activeRecordings.has(callId)) {
+      const existing = activeRecordings.get(callId);
+      console.log(`Recording already exists for call ${callId}, returning existing`);
+      return existing;
+    }
 
     // Get or create room
     let room = rooms.get(callId);
@@ -326,8 +335,10 @@ async function startRecording(callId) {
       setTimeout(() => reject(new Error('remoteRecorder.startRecording timed out')), 30000); // 30 second timeout
     });
     
+    const fileName = `call_${callId}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.wav`;
+    
     const rr = await Promise.race([
-      remoteRecorder.startRecording({ callId, router: room.router, producers: audioProducers }),
+      remoteRecorder.startRecording({ callId, router: room.router, producers: audioProducers, fileName }),
       timeoutPromise
     ]);
     
@@ -336,6 +347,7 @@ async function startRecording(callId) {
       callId,
       startTime: Date.now(),
       outPath: rr && rr.outPath ? rr.outPath : null,
+      fileName,
       provider: 'mediasoup-recording',
     };
     
@@ -385,7 +397,34 @@ async function stopRecording(callId) {
       await remoteRecorder.stopRecording(callId);
 
       // outPath is usually located in mediasoup-recording dir (e.g., call_<callId>.wav)
-      const expectedOut = recording.outPath || path.join(__dirname, 'mediasoup-recording', `call_${callId}.wav`);
+      const expectedOut =
+        recording.outPath ||
+        (recording.fileName ? path.join(__dirname, 'mediasoup-recording', recording.fileName)
+                          : path.join(__dirname, 'mediasoup-recording', `call_${callId}.wav`));
+      
+      // Wait for the WAV file to actually appear on disk (poll for 4 seconds)
+      const maxWaitTime = 4000; // 4 seconds
+      const pollInterval = 100; // 100ms between checks
+      const startTime = Date.now();
+      
+      while (Date.now() - startTime < maxWaitTime) {
+        try {
+          await fs.access(expectedOut);
+          // File exists, break out of the loop
+          break;
+        } catch (e) {
+          // File doesn't exist yet, wait and try again
+          await new Promise(resolve => setTimeout(resolve, pollInterval));
+        }
+      }
+      
+      // If file still doesn't exist after waiting, return a retryable error
+      try {
+        await fs.access(expectedOut);
+      } catch (e) {
+        console.warn('[recording] File did not appear after stop, returning retryable error');
+        return { callId, duration: Date.now() - recording.startTime, error: 'File did not appear after stop', retryable: true };
+      }
 
       // Ensure recordings dir exists
       try { await fs.access(RECORDINGS_DIR); } catch { await fs.mkdir(RECORDINGS_DIR, { recursive: true }); }
@@ -427,7 +466,9 @@ async function stopRecording(callId) {
       activeRecordings.delete(callId);
       
       // Return the expected file path if available
-      const fileName = recording.outPath ? path.basename(recording.outPath) : `call_${callId}.wav`;
+      const fileName = recording.outPath ? path.basename(recording.outPath) :
+                   recording.fileName ? recording.fileName :
+                   `call_${callId}.wav`;
       const downloadUrl = `/recordings/${fileName}`;
       
       return { callId, duration, downloadUrl };
@@ -480,7 +521,7 @@ function getStatus() {
 
   const active = {};
   for (const [callId, rec] of activeRecordings) {
-    active[callId] = { participants: rec.participants.map(p => ({ producerId: p.producerId, tempFile: p.tempFile })), startTime: rec.startTime };
+    active[callId] = { startTime: rec.startTime, outPath: rec.outPath, fileName: rec.fileName };
   }
 
   return { rooms: roomsSummary, activeRecordings: active };
@@ -506,6 +547,96 @@ function getRouterRtpCapabilities() {
   }
 }
 
+// Get available recordings from the recordings directory
+async function getAvailableRecordings() {
+  try {
+    console.log('Getting available recordings from:', RECORDINGS_DIR);
+    
+    // Check if recordings directory exists
+    try {
+      await fs.access(RECORDINGS_DIR);
+    } catch {
+      console.log('Recordings directory does not exist, creating it');
+      await fs.mkdir(RECORDINGS_DIR, { recursive: true });
+      return [];
+    }
+    
+    // Read all files from the recordings directory
+    const files = await fs.readdir(RECORDINGS_DIR);
+    
+    // Filter for .wav files and create recording objects
+    const wavFiles = files
+      .filter(file => file.toLowerCase().endsWith('.wav'))
+      .map(file => {
+        const filePath = path.join(RECORDINGS_DIR, file);
+        return {
+          fileName: file,
+          downloadUrl: `/recordings/${file}`,
+          filePath: filePath,
+          date: new Date(), // Will be updated with actual file stats below
+          size: 0, // Will be updated with actual file stats below
+        };
+      });
+    
+    // Get file stats for each recording
+    const recordingsWithStats = await Promise.all(wavFiles.map(async (rec) => {
+      try {
+        const stats = await fs.stat(rec.filePath);
+        return {
+          ...rec,
+          date: stats.mtime, // Use actual modification time
+          size: stats.size,
+        };
+      } catch (err) {
+        console.error('Error getting file stats for', rec.fileName, err);
+        return rec; // Return without stats if error
+      }
+    }));
+    
+    console.log(`Found ${recordingsWithStats.length} recordings`);
+    
+    // Sort by date (newest first)
+    recordingsWithStats.sort((a, b) => new Date(b.date) - new Date(a.date));
+    
+    return recordingsWithStats;
+  } catch (error) {
+    console.error('Error getting available recordings:', error);
+    return [];
+  }
+}
+
+// Delete a specific recording file
+async function deleteRecording(fileName) {
+  try {
+    console.log('Deleting recording:', fileName);
+    
+    // Validate filename to prevent directory traversal
+    if (!fileName || typeof fileName !== 'string' || !fileName.endsWith('.wav')) {
+      return { success: false, error: 'Invalid filename' };
+    }
+    
+    // Sanitize filename to prevent directory traversal attacks
+    const sanitizedFileName = path.basename(fileName);
+    const filePath = path.join(RECORDINGS_DIR, sanitizedFileName);
+    
+    // Check if file exists
+    try {
+      await fs.access(filePath);
+    } catch {
+      return { success: false, error: 'File does not exist' };
+    }
+    
+    // Delete the file
+    await fs.unlink(filePath);
+    
+    console.log('Successfully deleted recording:', fileName);
+    return { success: true };
+  } catch (error) {
+    console.error('Error deleting recording:', error);
+    return { success: false, error: error.message };
+  }
+}
+
 // Export functions
 module.exports = {
   initializeWorker,
@@ -517,4 +648,6 @@ module.exports = {
   makeRecordingAvailable,
   getStatus,
   getRouterRtpCapabilities,
+  getAvailableRecordings,
+  deleteRecording,
 };

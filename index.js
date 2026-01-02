@@ -3,7 +3,7 @@ const { createServer } = require('http');
 
 const express = require('express');
 const { getIO, initIO } = require('./socket');
-const { initializeWorker } = require('./recording');
+const { initializeWorker, getAvailableRecordings } = require('./recording');
 
 const app = express();
 
@@ -69,6 +69,118 @@ app.post('/stop-recording', async (req, res) => {
   }
 });
 
+// List recordings endpoint - NEW
+app.get('/api/recordings', async (req, res) => {
+  try {
+    console.log('[debug] /api/recordings called');
+    
+    // Get user ID from header
+    const userId = req.headers['x-user-id'];
+    if (!userId) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'X-User-Id header is required' 
+      });
+    }
+    
+    console.log(`[debug] Fetching recordings for user ID: ${userId}`);
+    
+    // Get available recordings
+    const recordings = await getAvailableRecordings();
+    
+    // Filter recordings for the current user
+    const userRecordings = recordings.filter(rec => {
+      // Extract user IDs from filename using regex pattern: call_(\d+)-(\d+)_
+      const match = rec.fileName.match(/^call_(\d+)-(\d+)_/);
+      if (match) {
+        const id1 = parseInt(match[1]);
+        const id2 = parseInt(match[2]);
+        
+        // Check if current user is one of the participants
+        return parseInt(userId) === id1 || parseInt(userId) === id2;
+      }
+      return false;
+    });
+    
+    // Format the recordings for the API response
+    const formattedRecordings = userRecordings.map(rec => ({
+      name: rec.fileName,
+      size: rec.size,
+      mtime: Math.floor(rec.date.getTime() / 1000), // Convert to Unix timestamp
+      url: `/api/recordings/file/${encodeURIComponent(rec.fileName)}`
+    }));
+    
+    // Sort by modification time (newest first)
+    formattedRecordings.sort((a, b) => b.mtime - a.mtime);
+    
+    res.json({ 
+      success: true, 
+      items: formattedRecordings 
+    });
+  } catch (error) {
+    console.error('[debug] Error listing recordings:', error && error.message ? error.message : error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get specific recording file - NEW
+app.get('/api/recordings/file/:filename', async (req, res) => {
+  try {
+    console.log(`[debug] /api/recordings/file/${req.params.filename} called`);
+    
+    // Get user ID from header
+    const userId = req.headers['x-user-id'];
+    if (!userId) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'X-User-Id header is required' 
+      });
+    }
+    
+    const filename = req.params.filename;
+    
+    // Validate filename format: call_(\d+)-(\d+)_...\.wav
+    const match = filename.match(/^call_(\d+)-(\d+)_.+\.wav$/);
+    if (!match) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Invalid filename format' 
+      });
+    }
+    
+    const id1 = parseInt(match[1]);
+    const id2 = parseInt(match[2]);
+    
+    // Check if current user is one of the participants
+    if (parseInt(userId) !== id1 && parseInt(userId) !== id2) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Access denied' 
+      });
+    }
+    
+    // Construct the file path
+    const filePath = path.join(__dirname, 'recordings', filename);
+    
+    // Check if file exists
+    const fs = require('fs').promises;
+    try {
+      await fs.access(filePath);
+    } catch (err) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'File not found' 
+      });
+    }
+    
+    // Serve the file
+    res.sendFile(filePath);
+  } catch (error) {
+    console.error('[debug] Error serving recording file:', error && error.message ? error.message : error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Debug endpoints
 app.get('/debug/recordings/status', (req, res) => {
   try {
@@ -115,8 +227,8 @@ app.post('/debug/recordings/stop', async (req, res) => {
   }
 });
 
-// Serve recording files for download
-app.use('/recordings', express.static(path.join(__dirname, 'recordings')));
+// Serve recording files for download - only for internal use, not direct access
+// app.use('/recordings', express.static(path.join(__dirname, 'recordings')));
 
 // Recording finished webhook
 app.post('/recording-finished', async (req, res) => {
@@ -136,4 +248,3 @@ app.post('/recording-finished', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-

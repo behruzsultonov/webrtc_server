@@ -27,7 +27,7 @@ a=rtcp-mux
 `;
 }
 
-async function startRecording({ callId, router, producers }) {
+async function startRecording({ callId, router, producers, fileName }) {
   if (!callId) throw new Error('callId required');
   if (!router) throw new Error('router required');
   if (!producers || producers.length === 0) throw new Error('no producers to record');
@@ -37,20 +37,12 @@ async function startRecording({ callId, router, producers }) {
     const existing = recordings.get(callId);
 
     const isExited = existing?.ffmpeg && existing.ffmpeg.exitCode !== null;
-    const outPath = existing?.outPath || existing?.filePath;
+    const outPath = existing?.outPath;
 
-    let sizeOk = false;
-    try {
-      if (outPath) {
-        const st = fs.statSync(outPath);
-        sizeOk = st.size > 44; // at least WAV header + data
-      }
-    } catch (e) {}
-
-    const isHealthy = existing?.ffmpeg && !isExited && sizeOk;
+    const isHealthy = existing?.ffmpeg && !isExited;
 
     if (!isHealthy) {
-      console.warn(`[mediasoup-recording] stale recording for ${callId}: exited=${isExited} sizeOk=${sizeOk}. Cleaning up...`);
+      console.warn(`[mediasoup-recording] stale recording for ${callId}: exited=${isExited}. Cleaning up...`);
       try { existing?.transports?.forEach(t => t?.close?.()); } catch {}
       try { existing?.sdpFiles?.forEach(f => { try { fs.unlinkSync(f); } catch {} }); } catch {}
       recordings.delete(callId);
@@ -76,6 +68,11 @@ async function startRecording({ callId, router, producers }) {
   const inputs = [];
 
   try {
+    // Calculate base name once outside the loop to ensure consistency
+    const base = fileName
+      ? path.parse(fileName).name
+      : `call_${callId}_${Date.now()}`;
+    
     // for each producer create a PlainRtpTransport + assign ports, pipe producer to transport
     for (let i = 0; i < producers.length; ++i) {
       const producer = producers[i];
@@ -114,7 +111,7 @@ async function startRecording({ callId, router, producers }) {
 
       const sdp = generateSdp({ port: rtpPort, payloadType, codec: codec.mimeType ? codec.mimeType.split('/')[1] : 'opus', clockRate: codec.clockRate || 48000, channels: codec.channels || 2 });
 
-      const sdpPath = path.join(tmpDir, `${callId}_in${i}.sdp`);
+      const sdpPath = path.join(tmpDir, `${base}_in${i}.sdp`);
       fs.writeFileSync(sdpPath, sdp);
       console.log(`[recording] wrote SDP ${sdpPath} for call ${callId} input ${i}`);
       sdpFiles.push(sdpPath);
@@ -123,7 +120,7 @@ async function startRecording({ callId, router, producers }) {
     }
 
     // Prepare ffmpeg args. If two inputs -> merge with amerge, else single input.
-    const outPath = path.join(recordingsDir, `call_${callId}.wav`);
+    const outPath = path.join(recordingsDir, fileName || `call_${callId}.wav`);
 
     let ffArgs = ['-y', '-hide_banner', '-loglevel', 'info'];
 
@@ -141,6 +138,7 @@ async function startRecording({ callId, router, producers }) {
     // spawn ffmpeg with a simple fallback: if one input fails to open, retry without it
     let ff = null;
     let alreadyRetried = false;
+    let stopping = false;
 
     function buildFfArgs(currentInputs) {
       let args = ['-y', '-hide_banner', '-loglevel', 'info'];
@@ -168,7 +166,7 @@ async function startRecording({ callId, router, producers }) {
 
         // detect "Error opening input file <path>" and if we still have >1 input, retry without the failing input
         const m = text.match(/Error opening input file\s+([^\s]+\.sdp)/i);
-        if (m && !alreadyRetried && currentInputs.length > 1) {
+        if (m && !alreadyRetried && currentInputs.length > 1 && !stopping) {
           alreadyRetried = true;
           // sanitize reported path: strip quotes and trailing punctuation that ffmpeg sometimes prints (e.g., ".")
           let badPath = m[1].trim().replace(/^["'`]+|["'`]+$/g, '');
@@ -186,7 +184,10 @@ async function startRecording({ callId, router, producers }) {
           setTimeout(() => {
             const newFf = spawnFfmpeg(filtered);
             // update recordings map to point to the new ffmpeg process so stopRecording acts on the right proc
-            recordings.set(callId, { ffmpeg: newFf, transports, sdpFiles, outPath });
+            const existingRec = recordings.get(callId);
+            if (existingRec) {
+              recordings.set(callId, { ffmpeg: newFf, transports: existingRec.transports, sdpFiles: existingRec.sdpFiles, outPath: existingRec.outPath, stopping: existingRec.stopping });
+            }
           }, 250);
         }
       });
@@ -207,47 +208,8 @@ async function startRecording({ callId, router, producers }) {
       try { await c.resume(); } catch (e) { console.warn('[recording] consumer resume failed', e); }
     }
 
-    // Wait until ffmpeg actually writes something useful to disk (small WAV header alone isn't enough if process exits immediately)
-    const waitForOutputFile = (minBytes = 44, timeoutMs = 5000) => new Promise((resolve) => {
-      const start = Date.now();
-      (function check() {
-        fs.stat(outPath, (err, st) => {
-          if (!err && st.size > minBytes) return resolve(true);
-          if (Date.now() - start > timeoutMs) return resolve(false);
-          setTimeout(check, 200);
-        });
-      })();
-    });
-
-    let wrote = await waitForOutputFile(44, 15000);
-
-    if (!wrote) {
-      console.warn(`[recording] ffmpeg did not produce output within timeout for call ${callId}; attempting fallback`);
-
-      // If we haven't retried yet and there are multiple inputs, try single-input fallback (pick first input)
-      if (!alreadyRetried && inputs.length > 1) {
-        alreadyRetried = true;
-        try { ff.kill('SIGKILL'); } catch (e) {}
-        console.log(`[recording] retrying ffmpeg for call ${callId} with single input ${path.basename(inputs[0].sdpPath)}`);
-        const single = [inputs[0]];
-        const newFf = spawnFfmpeg(single);
-
-        // wait again for output
-        const ok = await waitForOutputFile(44, 15000);
-        if (!ok) {
-          try { newFf.kill('SIGKILL'); } catch (e) {}
-          throw new Error('ffmpeg failed to produce output after fallback attempt');
-        }
-        // success with fallback; update ff reference
-        ff = newFf;
-      } else {
-        try { ff.kill('SIGKILL'); } catch (e) {}
-        throw new Error('ffmpeg failed to produce output file');
-      }
-    }
-
-    // At this point we have a running ffmpeg that produced output; track it in the map
-    recordings.set(callId, { ffmpeg: ff, transports, sdpFiles, outPath });
+    // At this point we have a running ffmpeg; track it in the map immediately
+    recordings.set(callId, { ffmpeg: ff, transports, sdpFiles, outPath, stopping: false });
 
     console.log(`Recording started for call ${callId}, file: ${outPath}`);
 
@@ -263,6 +225,9 @@ async function startRecording({ callId, router, producers }) {
 async function stopRecording(callId) {
   const rec = recordings.get(callId);
   if (!rec) throw new Error('no recording');
+  
+  // Mark that we're stopping this recording to prevent retry logic
+  rec.stopping = true;
 
   // request FFmpeg to finish gracefully
   try {

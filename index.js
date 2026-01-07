@@ -181,6 +181,57 @@ app.get('/api/recordings/file/:filename', async (req, res) => {
   }
 });
 
+// Delete specific recording file - NEW
+app.delete('/api/recordings/:filename', async (req, res) => {
+  try {
+    console.log(`[debug] /api/recordings/${req.params.filename} DELETE called`);
+    
+    // Get user ID from header
+    const userId = req.headers['x-user-id'];
+    if (!userId) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'X-User-Id header is required' 
+      });
+    }
+    
+    const filename = req.params.filename;
+    
+    // Validate filename format: call_(\d+)-(\d+)_...\.wav
+    const match = filename.match(/^call_(\d+)-(\d+)_.+\.wav$/);
+    if (!match) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Invalid filename format' 
+      });
+    }
+    
+    const id1 = parseInt(match[1]);
+    const id2 = parseInt(match[2]);
+    
+    // Check if current user is one of the participants
+    if (parseInt(userId) !== id1 && parseInt(userId) !== id2) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Access denied' 
+      });
+    }
+    
+    // Call the deleteRecording function from recording module
+    const { deleteRecording } = require('./recording');
+    const result = await deleteRecording(filename);
+    
+    if (result.success) {
+      res.json({ success: true, message: 'Recording deleted successfully' });
+    } else {
+      res.status(400).json({ success: false, message: result.error || 'Failed to delete recording' });
+    }
+  } catch (error) {
+    console.error('[debug] Error deleting recording:', error && error.message ? error.message : error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Debug endpoints
 app.get('/debug/recordings/status', (req, res) => {
   try {
